@@ -32,6 +32,9 @@ import {
 } from "lucide-react";
 import Board from "./components/Board.jsx";
 import Piece from "./components/Piece.jsx";
+import EnginePanel from "./components/EnginePanel.jsx";
+import useStockfish from "./useStockfish.js";
+import { moveUci, positionSpec } from "./scoring.js";
 import { openings, getOpening } from "./openings.js";
 import {
   checkAttempt,
@@ -114,6 +117,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const [sound, setSound] = useState(false);
+  const [engineEnabled, setEngineEnabled] = useState(true);
+  const [scoredAttempt, setScoredAttempt] = useState(null);
   const [hintsUsed, setHintsUsed] = useState(0);
   const [mistakes, setMistakes] = useState(0);
   const [storageWarning, setStorageWarning] = useState(false);
@@ -136,8 +141,26 @@ export default function App() {
       ),
     [mode, freeMoves, line, cursor],
   );
-  const history = game.history({ verbose: true });
+  const history = useMemo(() => game.history({ verbose: true }), [game]);
   const lastMove = history.at(-1);
+  const engineReview = useMemo(() => {
+    if (mode === "practice") return scoredAttempt;
+    if (!lastMove) return null;
+    return {
+      move: lastMove,
+      position: {
+        fen: lastMove.before,
+        moves: history.slice(0, -1).map(moveUci),
+      },
+      committed: true,
+    };
+  }, [mode, scoredAttempt, history, lastMove]);
+  const analysis = useStockfish({
+    game,
+    review: engineReview,
+    enabled: engineEnabled,
+    context: `${mode}/${openingId}/${lineId}/${playerSide}`,
+  });
   const nextMove = mode === "explore" ? null : expectedMove(line.moves, cursor);
   const finished = mode !== "explore" && cursor === line.moves.length;
   const thinking =
@@ -162,6 +185,7 @@ export default function App() {
     setHint(null);
     setFeedback(null);
     setPromotion(null);
+    setScoredAttempt(null);
   }
   function resetRun() {
     setHintsUsed(0);
@@ -371,6 +395,11 @@ export default function App() {
     }
     const result = checkAttempt(line.moves, cursor, from, to, promote);
     if (result.kind === "correct") {
+      setScoredAttempt({
+        move: result.move,
+        position: positionSpec(game),
+        committed: true,
+      });
       setCursor((c) => c + 1);
       setSelected(null);
       setHint(null);
@@ -379,6 +408,11 @@ export default function App() {
         text: `${result.move.san} — exactly. ${line.notes[cursor]}`,
       });
     } else if (result.kind === "different") {
+      setScoredAttempt({
+        move: result.move,
+        position: positionSpec(game),
+        committed: false,
+      });
       setMistakes((m) => m + 1);
       setSelected(null);
       setFeedback({
@@ -887,6 +921,14 @@ export default function App() {
                   "Click or drag a piece to play."}
               </span>
             </div>
+            <EnginePanel
+              analysis={analysis}
+              enabled={engineEnabled}
+              onToggle={() => setEngineEnabled((value) => !value)}
+              mode={mode}
+              fen={game.fen()}
+              onHelp={() => setModal("scoring")}
+            />
           </section>
 
           <aside className="lesson-panel" aria-label="Opening lesson">
@@ -1192,7 +1234,7 @@ export default function App() {
               <ArrowUpRight size={13} />
             </button>
             <span className="footer-version">
-              V1.0 · 10 openings · 20 lines
+              V1.1 · 10 openings · Stockfish scoring
             </span>
           </div>
         </footer>
@@ -1399,6 +1441,83 @@ export default function App() {
           </div>
         </Modal>
       )}
+      {modal === "scoring" && (
+        <Modal title="What does the engine see?" onClose={() => setModal(null)}>
+          <p className="modal-intro">
+            Stockfish 19 Lite analyzes the position in your browser. It compares
+            the best move it finds with the move played, or with your legal
+            off-line attempt in Practice.
+          </p>
+          <div className="plan-card">
+            <span className="side-dot" />
+            <div>
+              <h3>Read every score from White’s side</h3>
+              <p>
+                Positive favors White; negative favors Black, even when the
+                board is flipped. The numbers use engine pawn units, not a count
+                of extra material. M3 is a mating line in three moves; −M3
+                favors Black.
+              </p>
+            </div>
+          </div>
+          <div className="plan-card">
+            <span className="side-dot black" />
+            <div>
+              <h3>Compare the choices</h3>
+              <p>
+                Centipawn loss is the best-move evaluation minus the played-move
+                evaluation, both from the mover’s perspective. 100 cp is 1.00
+                engine evaluation unit. Forced mates are handled separately
+                rather than converted to fake pawn scores.
+              </p>
+            </div>
+          </div>
+          <div className="scoring-scale">
+            <span>
+              Best <b>Engine’s first choice</b>
+            </span>
+            <span>
+              Excellent <b>0–20 cp lost</b>
+            </span>
+            <span>
+              Good <b>21–50 cp lost</b>
+            </span>
+            <span>
+              Inaccuracy <b>51–100 cp lost</b>
+            </span>
+            <span>
+              Mistake <b>101–200 cp lost</b>
+            </span>
+            <span>
+              Blunder <b>Over 200 cp, or allows mate</b>
+            </span>
+          </div>
+          <p>
+            These are First Moves’ teaching labels, not official Stockfish
+            accuracy ratings. Searches aim for depth 14 with a short time limit
+            per search. The actual depth is shown, and results can change with
+            deeper analysis.
+          </p>
+          <div className="modal-callout">
+            <BookOpen size={20} />
+            <p>
+              A lesson match and a strong chess move are different things.
+              Practice still follows its chosen line. A good off-line attempt
+              stays on the original board, and its hypothetical score is clearly
+              marked. Engine suggestions in Practice are hidden until requested.
+            </p>
+          </div>
+          <p className="source-link">
+            <a href="./engine/README.txt" target="_blank" rel="noreferrer">
+              Engine details & source <ExternalLink size={12} />
+            </a>{" "}
+            ·{" "}
+            <a href="./engine/COPYING.txt" target="_blank" rel="noreferrer">
+              GPLv3 license <ExternalLink size={12} />
+            </a>
+          </p>
+        </Modal>
+      )}
       {modal === "sources" && (
         <Modal
           title="A little more about First Moves"
@@ -1435,6 +1554,11 @@ export default function App() {
               devices.
             </p>
           </div>
+          <p className="source-link">
+            <a href="./engine/README.txt" target="_blank" rel="noreferrer">
+              Stockfish 19 · source & license <ExternalLink size={12} />
+            </a>
+          </p>
           <p className="source-link">
             <a
               href="https://github.com/jhlywa/chess.js"
